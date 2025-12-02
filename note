@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+set -o pipefail
+
+export EDITOR="${EDITOR:-vi}"
+export PASSWORD_STORE_DIR="$HOME/.note-store"
+
+CMDS=(fzf gpg glow pass rg)
+
+for cmd in "${CMDS[@]}"; do
+  command -v "$cmd" >/dev/null 2>&1 || {
+    echo "$cmd not found, please install it"
+    exit 1
+  }
+done
+
+if [[ "$1" == "init" ]]; then
+  shift
+  pass init "$@"
+  exit
+elif [[ "$1" == "--help" ]]; then
+  pass --help
+  exit
+fi
+
+if [[ ! -f "$PASSWORD_STORE_DIR/.gpg-id" ]]; then
+  echo "Password store not initialized" >&2
+  exit 1
+fi
+
+GPGID=$(head -n1 "$PASSWORD_STORE_DIR/.gpg-id")
+
+tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT
+
+printf "" | gpg --quiet --encrypt --recipient "$GPGID" >"$tmpfile" || exit 1
+gpg --quiet --decrypt "$tmpfile" >/dev/null || exit 1
+
+list_entries() {
+  [[ -d "$PASSWORD_STORE_DIR" ]] || return 0
+  find "$PASSWORD_STORE_DIR" -maxdepth 1 -type f -name '*.gpg' -printf '%f\n' | sed 's/\.gpg$//'
+}
+
+open_selector() {
+  local entries=("$@")
+  local sel
+  sel=$(printf "%s\n" "${entries[@]}" |
+    fzf --preview 'pass show {} | glow -' --preview-window=right:70%)
+  echo -n "$sel"
+}
+
+list_notes() {
+  local entries
+  mapfile -t entries < <(list_entries)
+
+  local sel
+  sel=$(open_selector "${entries[@]}")
+
+  [[ -n "$sel" ]] && pass edit "$sel"
+  exit
+}
+
+list_notes_grep() {
+  shift
+  local query="$*"
+
+  if [[ -z "$query" ]]; then
+    echo "Usage: note grep <query>"
+    exit 1
+  fi
+
+  mapfile -t entries < <(list_entries)
+  local matches=()
+
+  for e in "${entries[@]}"; do
+    if pass show "$e" 2>/dev/null | rg -i --quiet -- "$query"; then
+      matches+=("$e")
+    fi
+  done
+
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    echo "No matches for '$query'"
+    exit
+  fi
+
+  local sel
+  sel=$(open_selector "${matches[@]}")
+
+  [[ -n "$sel" ]] && pass edit "$sel"
+  exit
+}
+
+if [[ $# -eq 0 ]]; then
+  list_notes
+fi
+
+case "$1" in
+  ls) list_notes ;;
+  grep) list_notes_grep "$@" ;;
+  *) pass "$@" ;;
+esac
